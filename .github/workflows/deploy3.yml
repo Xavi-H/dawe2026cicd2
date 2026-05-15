@@ -1,32 +1,69 @@
-name: Desplegament a EC2
+name: Deploy Dinàmic amb GHCR
 
 on:
   push:
-    branches: [main]
+    branches: [ "main" ]
   workflow_dispatch:
 
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
 jobs:
+  # JOB 1: Construcción de la imagen
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # Permiso necesario para subir la imagen al registro de GitHub
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tags }}
+    steps:
+      - name: Checkout codi
+        uses: actions/checkout@v4 # Paso para copiar tu código en el runner
+
+      - name: Login al GHCR
+        uses: docker/login-action@v3 # Autenticación en el registro de GitHub
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extreure metadades (tags/labels)
+        id: meta
+        uses: docker/metadata-action@v5 # Genera etiquetas automáticas (como 'latest' o el ID del commit)
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+
+      - name: Construir i pujar imatge Docker
+        uses: docker/build-push-action@v5 # El "corazón" del build: crea la imagen y la sube al GHCR
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  # JOB 2: Despliegue en el servidor
   deploy:
+    needs: build # Este job no empieza hasta que el de 'build' termine con éxito
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Copiar fitxers al servidor
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USER }}
-          key: ${{ secrets.EC2_SSH_KEY }}
-          source: "docker-compose.yml,docker-compose.override.yml,Dockerfile,src/,db/"
-          target: ~/taskmanager
-
-      - name: Construir i arrencar
-        uses: appleboy/ssh-action@v1.0.3
+      - name: Desplegament a EC2 per SSH
+        uses: appleboy/ssh-action@v1.0.3 # Conexión remota segura a AWS
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
-            cd ~/taskmanager
-            export PORT=80 
-            docker compose up -d --build
+            # 1. Login en el registro de imágenes desde el servidor de AWS
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
+            
+            # 2. Definimos las variables de entorno para que Docker Compose sepa qué imagen usar
+            # Usamos 'main' como tag porque es la rama que dispara el build
+            export IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:main
+            export PORT=80
+            
+            # 3. Actualización de los contenedores
+            # --pull always: obliga a descargar la versión más nueva de la imagen
+            # --no-build: asegura que no intente compilar nada localmente en AWS
+            docker compose -f docker-compose.yml up -d --pull always --no-build
