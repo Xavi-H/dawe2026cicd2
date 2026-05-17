@@ -1,0 +1,53 @@
+name: Deploy Dinàmic amb Docker Hub
+
+# El pipeline s'activarà quan facis un push a main o de manera manual
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  # JOB 1: CONSTRUCCIÓ I PUBLICACIÓ DE LA IMATGE
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout del codi
+        uses: actions/checkout@v4 # Baixa el codi del repositori al runner [cite: 283]
+
+      - name: Login a Docker Hub
+        uses: docker/login-action@v3 # Fa login fent servir els secrets que hem configurat [cite: 284]
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Construir i pujar la imatge a Docker Hub
+        uses: docker/build-push-action@v5 # Construeix el Dockerfile i el puja [cite: 285]
+        with:
+          context: .
+          push: true
+          # Definim el nom de la imatge: el teu usuari / nom del repositori:etiqueta
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/${{ github.event.repository.name }}:latest
+
+  # JOB 2: DESPLEGAMENT AL SERVIDOR AWS EC2
+  deploy:
+    needs: build # Aquest job no començarà fins que el 'build' hagi acabat correctament [cite: 287]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Desplegar a AWS per SSH
+        uses: appleboy/ssh-action@v1.0.3 # Es connecta remotament a l'EC2 [cite: 286]
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            # 1. Fer login a Docker Hub des de l'interior del servidor AWS
+            echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u ${{ secrets.DOCKERHUB_USERNAME }} --password-stdin
+            
+            # 2. Exportar les variables d'entorn per al docker-compose del servidor
+            export IMAGE=${{ secrets.DOCKERHUB_USERNAME }}/${{ github.event.repository.name }}:latest
+            export PORT=80
+            
+            # 3. Forçar la descàrrega de la imatge de Docker Hub i reiniciar el servei
+            # --pull always: S'assegura de baixar la imatge més nova de Docker Hub [cite: 298]
+            # --no-build: Prohibeix a AWS intentar compilar el codi localment [cite: 298]
+            docker compose -f docker-compose.yml up -d --pull always --no-build
